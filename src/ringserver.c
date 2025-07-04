@@ -39,6 +39,7 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/un.h>
 
 #include <libmseed.h>
 
@@ -858,36 +859,36 @@ ListenThread (void *arg)
   /* Enter connection dispatch loop, spawning a new thread for each incoming connection */
   while (!param.shutdownsig)
   {
-    /* Process next connection in queue */
-    clientsocket = accept (lpp->socket, paddr, &addrlen);
-
-    /* Check for accept errors */
-    if (clientsocket == -1)
-    {
-      /* Continue listening on these non-fatal errors */
-      if (errno == ECONNABORTED || errno == EINTR)
+    if (lpp->options & FAMILY_UNIX) {
+      struct sockaddr_un addr_un;
+      socklen_t addrlen_un = sizeof(addr_un);
+      clientsocket = accept(lpp->socket, (struct sockaddr*)&addr_un, &addrlen_un);
+      if (clientsocket == -1) {
+        if (errno == ECONNABORTED || errno == EINTR)
+          continue;
+        if (!param.shutdownsig)
+          lprintf(0, "Could not accept incoming UNIX connection: %s", strerror(errno));
+        break;
+      }
+      snprintf(ipstr, sizeof(ipstr), "unix");
+      snprintf(portstr, sizeof(portstr), "%s", lpp->portstr);
+    } else {
+      clientsocket = accept(lpp->socket, paddr, &addrlen);
+      if (clientsocket == -1) {
+        if (errno == ECONNABORTED || errno == EINTR)
+          continue;
+        if (!param.shutdownsig)
+          lprintf(0, "Could not accept incoming connection: %s", strerror(errno));
+        break;
+      }
+      if (setsockopt(clientsocket, tcpprotonumber, TCP_NODELAY, (void *)&one, sizeof(one))) {
+        lprintf(0, "Could not disable TCP delay algorithm: %s", strerror (errno));
+      }
+      if (getnameinfo(paddr, addrlen, ipstr, sizeof(ipstr), portstr, sizeof(portstr), NI_NUMERICHOST | NI_NUMERICSERV)) {
+        lprintf(0, "Error creating IP and port strings");
+        close(clientsocket);
         continue;
-
-      /* If not shutting down this is a connection error */
-      if (!param.shutdownsig)
-        lprintf (0, "Could not accept incoming connection: %s", strerror (errno));
-
-      break;
-    }
-
-    /* Turn off TCP delay algorithm (Nagle) */
-    if (setsockopt (clientsocket, tcpprotonumber, TCP_NODELAY, (void *)&one, sizeof (one)))
-    {
-      lprintf (0, "Could not disable TCP delay algorithm: %s", strerror (errno));
-    }
-
-    /* Generate IP address and port number strings */
-    if (getnameinfo (paddr, addrlen, ipstr, sizeof (ipstr), portstr, sizeof (portstr),
-                     NI_NUMERICHOST | NI_NUMERICSERV))
-    {
-      lprintf (0, "Error creating IP and port strings");
-      close (clientsocket);
-      continue;
+      }
     }
 
     lprintf (2, "Incoming connection on port %s from %s:%s", lpp->portstr, ipstr, portstr);
@@ -1102,7 +1103,9 @@ ListenThread (void *arg)
   pthread_mutex_unlock (&(mytdp->td_lock));
 
   lprintf (1, "Listening thread closing");
-
+  if (lpp->options & FAMILY_UNIX) {
+    unlink(lpp->portstr);
+  }
   return NULL;
 } /* End of ListenThread() */
 
@@ -1331,6 +1334,8 @@ GenProtocolString (ListenProtocols protocols, ListenOptions options,
     family = "IPv4";
   else if (options & FAMILY_IPv6)
     family = "IPv6";
+  else if (options & FAMILY_UNIX)
+    family = "UNIX";
   else
     family = "Unknown family?";
 

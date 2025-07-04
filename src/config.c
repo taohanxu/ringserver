@@ -30,6 +30,7 @@
 #include <sys/stat.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <sys/un.h>
 
 #include "clients.h"
 #include "ringserver.h"
@@ -1114,6 +1115,13 @@ SetParameter (const char *paramstring, int dynamiconly)
     lpp.options   = 0;
     lpp.socket    = -1;
 
+
+    size_t len = strlen(lpp.portstr);
+    if ((len > 5 && strcmp(lpp.portstr + len - 5, ".sock") == 0) || strchr(lpp.portstr, '/'))
+    {
+      lpp.options |= FAMILY_UNIX;
+    }
+
     /* Parse optional protocol flags to limit allowed protocols */
     for (int idx = 2, allow_protocols = (lpp.protocols == 0) ? 1 : 0;
          idx < fieldcount;
@@ -1473,6 +1481,35 @@ YesNo (const char *value)
 static int
 InitServerSocket (char *portstr, ListenOptions options)
 {
+  if (options & FAMILY_UNIX)
+  {
+    struct sockaddr_un addr_un;
+    int fd;
+    memset(&addr_un, 0, sizeof(addr_un));
+    addr_un.sun_family = AF_UNIX;
+    strncpy(addr_un.sun_path, portstr, sizeof(addr_un.sun_path) - 1);
+    unlink(portstr);
+    fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0)
+    {
+      lprintf(0, "Error with socket(), UNIX path %s: %s", portstr, strerror(errno));
+      return -1;
+    }
+    if (bind(fd, (struct sockaddr*)&addr_un, sizeof(addr_un)) < 0)
+    {
+      lprintf(0, "Error with bind(), UNIX path %s: %s", portstr, strerror(errno));
+      close(fd);
+      return -1;
+    }
+    if (listen(fd, 10) == -1)
+    {
+      lprintf(0, "Error with listen(), UNIX path %s: %s", portstr, strerror(errno));
+      close(fd);
+      return -1;
+    }
+    return fd;
+  }
+
   struct addrinfo *addr;
   struct addrinfo hints;
   char *familystr = NULL;
@@ -1667,6 +1704,32 @@ AddListenThreads (ListenPortParams *lpp)
   {
     families |= FAMILY_IPv6;
     options &= ~FAMILY_IPv6;
+  }
+  if (options & FAMILY_UNIX)
+  {
+    families |= FAMILY_UNIX;
+    options &= ~FAMILY_UNIX;
+  }
+
+  /* 如果是 unix socket，只初始化 unix socket 并直接返回 */
+  if (families & FAMILY_UNIX)
+  {
+    lpp->options = options | FAMILY_UNIX;
+    if ((lpp->socket = InitServerSocket(lpp->portstr, lpp->options)) > 0)
+    {
+      if (AddServerThread(LISTEN_THREAD, lpp))
+      {
+        return 0;
+      }
+      threads += 1;
+    }
+    else
+    {
+      lprintf(0, "Error initializing UNIX server listening socket for path %s", lpp->portstr);
+      return 0;
+    }
+    lpp->options = options | families;
+    return threads;
   }
 
   /* Try to initialize listening for IPv4, if requested or default (no family specified) */
@@ -2253,8 +2316,10 @@ RingDirectory ring\n\
 # certificate file must be specified using the TLSCertificateFile\n\
 # parameter. By default TLS is not enabled.\n\
 #\n\
+# UNIX domain sockets can be enabled by using a .sock path or any path with '/'.\n\
 # For example:\n\
-# ListenPort <port> [DataLink] [SeedLink] [HTTP] [IPv4] [IPv6] [TLS]\n\
+# ListenPort /tmp/seedlink.sock [DataLink] [SeedLink] [HTTP]\n\
+# ListenPort ./myring.sock SeedLink\n\
 #\n\
 # This parameter can be specified multiple times to listen for connections\n\
 # on multiple ports.\n\

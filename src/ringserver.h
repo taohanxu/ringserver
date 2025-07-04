@@ -87,6 +87,7 @@ typedef enum
   ENCRYPTION_TLS = 1u << 1,
   FAMILY_IPv4    = 1u << 2,
   FAMILY_IPv6    = 1u << 3,
+  FAMILY_UNIX    = 1u << 4,
 } ListenOptions;
 
 /* Doubly-linked structure of client threads */
